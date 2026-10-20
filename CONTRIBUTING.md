@@ -47,6 +47,13 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ## Releasing
 
+Without GitHub Actions, from a Mac with the updater key in `~/.tauri/duo-switch.key`:
+bump `version`, date its `CHANGELOG.md` section, commit, tag `vX.Y.Z` and push the
+tag, then run `sh scripts/build-release-macos.sh` and `sh scripts/publish-release.sh`
+(it asks for the key's password, signs, writes `latest.json` and publishes).
+
+With GitHub Actions:
+
 Bump `version` in the root `Cargo.toml` (the app takes its version from there),
 date the section in `CHANGELOG.md`, then push a tag `vX.Y.Z`. The Release workflow
 builds the Windows installer and portable zip, the macOS `.dmg`s, and publishes

@@ -3,7 +3,7 @@
 Release notes are taken from the section headed `## [X.Y.Z]` matching the tag
 `vX.Y.Z`: rename `Unreleased` to the version and date when releasing.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-20
 
 - Claude Desktop: switch between profiles (one account each), assign each its
   account, bring Code Local sessions along by hand or on every switch

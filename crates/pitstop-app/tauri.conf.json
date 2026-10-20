@@ -48,7 +48,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ2MTIyRDk3N0UxMEVENDgKUldSSTdSQitseTBTUmg2SmdRQS9OTEhjbmRpVXRrYUcvVDZVMWxWUGpsa2s3d0tzczI5dm5qakkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyOTdFN0RDRUNEOEEyNjgKUldSb290anMzT2VYZ29JZU0vUGlBR0F1K1FaM3lYME01Nzl1TG1Oa1c2NFBCOThXYXYrdldabjgK",
       "requireSignedVersion": true,
       "endpoints": ["https://github.com/kikuchanj1806/duo-switch/releases/latest/download/latest.json"],
       "windows": {
