@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Merged by `tauri build`; macos/bundle.sh writes the same key itself. -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Duo Switch asks Claude Desktop to quit before switching its profile, and never forces it.</string>
+</dict>
+</plist>
