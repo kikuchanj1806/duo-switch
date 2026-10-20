@@ -498,7 +498,7 @@ function renderAccounts(moves) {
   shownCallouts = keys;
 
   const shown = snap.tools.filter((tool) => tool.accounts.length);
-  const desktop = desktopGroups();
+  const desktop = desktopGroups(moves);
   if (!shown.length && !callouts.length && !desktop.length) {
     return empty({
       iconName: "accounts",
@@ -632,7 +632,14 @@ function metersOf(tool, account, moves) {
       bar.append(mark);
       bar.title = t("paceHelp", { n: Math.round(pace.expected) });
     }
-    const resets = fresh ? t("justReset") : w.resetsAt && w.resetsAt > now ? t("resetsIn", { d: duration(w.resetsAt - now) }) : "";
+    // Claude Desktop's resets are estimated from its usage history.
+    const resets = fresh
+      ? t("justReset")
+      : w.resetsAt && w.resetsAt > now
+        ? t(w.estimated ? "resetsInAbout" : "resetsIn", { d: duration(w.resetsAt - now) })
+        : w.resetsBy && w.resetsBy > now
+          ? t("resetsWithin", { d: duration(w.resetsBy - now) })
+          : "";
     const paceWords = off ? t(pace.standing === "over" ? "overPace" : "underPace", { n: Math.round(Math.abs(pace.diff)) }) : "";
     grid.append(
       h("span", { class: "meter-label", text: windowName(w.label) }),
@@ -736,15 +743,18 @@ function pushNotice(notice) {
 }
 
 function suggestionNotice(suggestion) {
+  const desk = suggestion.provider === "claude-desktop" ? desktopOf() : null;
   const tool = toolOf(suggestion.provider);
   const target = tool && tool.accounts.find((a) => a.name === suggestion.to);
+  const profile = desk && desk.profiles.find((p) => p.name === suggestion.to);
+  const run = desk ? () => profile && switchDesktop(desk, profile) : () => useAccount(tool, target);
   return noticeRow({
     key: `suggest:${suggestion.provider}:${suggestion.from}:${suggestion.to}:${suggestion.window}`,
     kind: "warning",
     icon: "swap",
     title: t("ranOutTitle", { name: suggestion.from, window: windowName(suggestion.window, true) }),
     lines: [t("ranOutDetail", { other: suggestion.to })],
-    actions: [{ title: t("switchTo", { name: suggestion.to }), kind: "primary", run: () => useAccount(tool, target) }],
+    actions: [{ title: t("switchTo", { name: suggestion.to }), kind: "primary", run }],
   });
 }
 
@@ -1660,7 +1670,7 @@ function shortPair(pair) {
   return `${cut(account)} / ${cut(org || "")}`;
 }
 
-function desktopGroups() {
+function desktopGroups(moves) {
   const d = desktopOf();
   if (!d) return [];
   const head = h(
@@ -1689,12 +1699,18 @@ function desktopGroups() {
     { class: "group", "aria-label": DESKTOP },
     head,
     d.state === "broken" ? h("div", { class: "callouts" }, noticeRow({ key: "desktop-broken", kind: "error", icon: "error", title: t("desktopBroken"), lines: [d.message || ""] })) : null,
-    h("div", { class: "panel" }, d.profiles.map((p) => desktopRow(d, p))),
+    h("div", { class: "panel" }, d.profiles.map((p) => desktopRow(d, p, moves))),
   );
   return [profiles, desktopManage(d)];
 }
 
-function desktopRow(d, p) {
+/** A profile's limits drawn as an account's are, from what Claude Desktop recorded. */
+function desktopMeters(p, moves) {
+  if (!p.limits || !p.limits.windows.length) return null;
+  return metersOf({ id: "claude-desktop" }, { name: p.name, usage: { status: "ok", windows: p.limits.windows } }, moves);
+}
+
+function desktopRow(d, p, moves) {
   const key = `desktop|${p.name}`;
   const side = desktopBusy.has(p.name)
     ? h("div", { class: "spinner", role: "status", "aria-label": t("switching") })
@@ -1755,7 +1771,8 @@ function desktopRow(d, p) {
             : null,
     ),
     h("div", { class: "row-side" }, side),
-    chips.length ? h("div", { class: "notes" }, chips) : null,
+    desktopMeters(p, moves),
+    chips.length || p.limits ? h("div", { class: "notes" }, chips, p.limits ? h("span", { class: "parked-at", title: t("desktopLimitsHelp"), text: t("desktopLimitsAt", { ago: ago(p.limits.readAt) }) }) : null) : null,
   );
 }
 
@@ -1873,8 +1890,10 @@ function syncLines(report) {
 }
 
 function openDesktopAssign(p) {
-  const pair = p.account || (p.pairs.length === 1 ? p.pairs[0].pair : p.pairs.length ? p.pairs[0].pair : "");
-  openDialog({ type: "desktopAssign", name: p.name, pairs: p.pairs, pair, error: null, busy: false });
+  // The account Claude Desktop says is signed in comes first; never a guess.
+  const signedIn = p.signedIn && p.pairs.find((x) => x.pair.split("/")[0] === p.signedIn);
+  const pair = p.account || (signedIn && signedIn.pair) || (p.pairs.length ? p.pairs[0].pair : "");
+  openDialog({ type: "desktopAssign", name: p.name, pairs: p.pairs, signedIn: p.signedIn, pair, label: p.label || "", hadLabel: p.label || "", error: null, busy: false });
 }
 
 function openDesktopSync() {
@@ -1937,6 +1956,8 @@ Object.assign(DIALOGS, {
       renderDialog();
       try {
         await invoke("desktop_assign", { name: d.name, pair: d.pair });
+        const label = d.label.trim();
+        if (label !== d.hadLabel) await invoke("desktop_set_label", { name: d.name, label: label || null });
         closeDialog();
       } catch (error) {
         d.busy = false;
@@ -1959,11 +1980,37 @@ Object.assign(DIALOGS, {
           renderDialog();
         },
       },
-      d.pairs.map((x) => h("option", { value: x.pair, selected: x.pair === d.pair }, `${shortPair(x.pair)} · ${t("desktopCards", { n: x.cards })}`)),
+      d.pairs.map((x) =>
+        h(
+          "option",
+          { value: x.pair, selected: x.pair === d.pair },
+          [shortPair(x.pair), t("desktopCards", { n: x.cards }), x.pair.split("/")[0] === d.signedIn ? t("desktopSignedIn") : null].filter(Boolean).join(" · "),
+        ),
+      ),
     );
+    const email = h("input", {
+      type: "text",
+      "data-field": "label",
+      value: d.label,
+      placeholder: t("desktopLabelPrompt"),
+      spellcheck: "false",
+      autocomplete: "off",
+      maxlength: "100",
+      disabled: d.busy,
+      oninput: (event) => {
+        d.label = event.target.value;
+        d.error = null;
+      },
+    });
     return [
       sheetHead(t("desktopAssignTitle", { name: d.name }), t("desktopAssignMessage")),
-      h("div", { class: "form" }, field(t("desktopAccount"), h("span", { class: "select" }, choice)), h("p", { class: "footnote", text: d.pair })),
+      h(
+        "div",
+        { class: "form" },
+        field(t("desktopAccount"), h("span", { class: "select" }, choice)),
+        h("p", { class: "footnote", text: d.pair }),
+        field(t("desktopEmailField"), email),
+      ),
       failureBox(t("couldntChange"), d.error),
       buttons(
         h("span", { class: "spacer" }),

@@ -140,6 +140,8 @@ fn chosen(app: &AppHandle, id: &str) {
     let parts: Vec<&str> = id.split('|').collect();
     let owned = app.clone();
     match parts.as_slice() {
+        #[cfg(target_os = "macos")]
+        ["suggest", crate::model::DESKTOP_ID, name] => crate::desktop::switch_from_tray(app, name),
         ["use" | "suggest", provider, name] => switch(app, provider, name),
         ["name", provider] => app::open_dialog(app, "name", Some(provider), None),
         ["add"] => app::open_dialog(app, "add", None, None),

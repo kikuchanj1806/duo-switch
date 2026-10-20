@@ -413,6 +413,48 @@ fn a_display_name_is_kept_beside_the_account_and_cleared_to_the_backups() {
 }
 
 #[test]
+fn the_signed_in_account_and_its_recorded_limits_show_before_any_assignment() {
+    let w = world();
+    w.d.setup("tk1").unwrap();
+    w.sessions("tk1", "aaa/a0a");
+    w.sessions("tk1", "bbb/b0b");
+    let profile = w.root().join("tk1");
+    fs::write(
+        profile.join("config.json"),
+        r#"{"oauth:tokenCache":"opaque","lastKnownAccountUuid":"bbb","locale":"vi"}"#,
+    )
+    .unwrap();
+    fs::write(
+        profile.join("plan-usage-history.json"),
+        r#"{"version":2,"samples":[
+            {"t":1800000000000,"org":"a0a","u":{"fh":90,"sd":90}},
+            {"t":1800000900000,"org":"b0b","u":{"fh":0,"sd":10}},
+            {"t":1800001800000,"org":"b0b","u":{"fh":25,"sd":12}}]}"#,
+    )
+    .unwrap();
+    let o = w.d.overview();
+    let p = &o.profiles[0];
+    assert_eq!(p.account, None);
+    assert_eq!(p.signed_in.as_deref(), Some("bbb"));
+    let limits = p.limits.as_ref().expect("the signed-in account's limits");
+    assert_eq!(limits.read_at, 1_800_001_800);
+    let percents: Vec<_> = limits
+        .windows
+        .iter()
+        .map(|w| (w.label.as_str(), w.percent))
+        .collect();
+    assert_eq!(percents, [("5h", 25.0), ("week", 12.0)]);
+
+    // Once assigned, the assigned account's limits show, whoever signed in.
+    w.d.assign("tk1", "aaa/a0a").unwrap();
+    let o = w.d.overview();
+    assert_eq!(
+        o.profiles[0].limits.as_ref().unwrap().windows[0].percent,
+        90.0
+    );
+}
+
+#[test]
 fn no_claude_desktop_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     let d = Desktop::new(Paths::new(dir.path(), true), FakeApp::default()).unwrap();

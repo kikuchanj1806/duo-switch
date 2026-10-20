@@ -71,6 +71,11 @@ Duo Switch làm hai việc:
 - Mỗi lần chuyển, Duo Switch làm lần lượt: yêu cầu Claude thoát, sao lưu hồ sơ
   đang dùng (không gồm cache), chuyển sang hồ sơ mới, chạy auto-sync nếu đang
   bật, rồi mở lại Claude.
+- **Giới hạn 5 giờ / tuần:** mỗi hồ sơ hiện % đã dùng, đọc từ số liệu mà
+  chính Claude Desktop ghi lại khi đang mở hồ sơ đó (dòng "số liệu … trước").
+  Thời điểm reset là **ước tính** (có dấu `~`); khi không đủ dữ liệu, app chỉ
+  ghi mốc muộn nhất ("reset trong vòng …"). Hồ sơ đang dùng hết hạn mức thì
+  app gợi ý chuyển sang hồ sơ còn trống.
 - **Hiện email cho hồ sơ:** chuột phải vào hồ sơ, chọn **Đặt tên hiển thị…**
   và ghi email. Email được che mờ, bấm vào mới hiện.
 

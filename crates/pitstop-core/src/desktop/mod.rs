@@ -23,6 +23,7 @@
 pub mod card;
 pub mod control;
 mod fsx;
+pub mod limits;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -215,7 +216,7 @@ pub struct PairView {
     pub cards: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileView {
     pub name: String,
@@ -228,11 +229,16 @@ pub struct ProfileView {
     pub autosync_error: Option<String>,
     /// A name to show for the profile's account, set by hand.
     pub label: Option<String>,
+    /// The account Claude Desktop says it last signed in to in this profile
+    /// (`lastKnownAccountUuid`), to assign without guessing.
+    pub signed_in: Option<String>,
+    /// Its limits as Claude Desktop last recorded them (see [`limits`]).
+    pub limits: Option<limits::Limits>,
 }
 
 /// What the window shows of Claude Desktop: names, folder ids and display
 /// names. Never a token or a cookie.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Overview {
     /// `missing` (no Claude Desktop), `notSetUp` (a plain app folder),
@@ -663,6 +669,24 @@ impl<A: DesktopApp> Desktop<A> {
             &self.autosync_path(name),
             &card::to_bytes(&json!({"enabled": false})),
         )
+    }
+
+    /// The account Claude Desktop last signed in to in profile `name`, from
+    /// its `config.json`. Only that one field is kept; the rest of the file,
+    /// a sign-in cache among it, is read past and dropped.
+    pub fn signed_in(&self, name: &str) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct Config {
+            #[serde(rename = "lastKnownAccountUuid")]
+            account: Option<String>,
+        }
+        let path = self.paths.root.join(name).join("config.json");
+        let meta = fs::symlink_metadata(&path).ok()?;
+        if !meta.is_file() || meta.len() > 4 * 1024 * 1024 {
+            return None;
+        }
+        let config: Config = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
+        config.account.filter(|a| is_id(a))
     }
 
     fn label_path(&self, name: &str) -> PathBuf {
@@ -1253,7 +1277,7 @@ impl<A: DesktopApp> Desktop<A> {
                     Ok(setting) => (setting, None),
                     Err(e) => (AutoSync::default(), Some(e.to_string())),
                 };
-                let pairs = self
+                let pairs: Vec<PairView> = self
                     .pairs(&name)
                     .unwrap_or_default()
                     .into_iter()
@@ -1263,6 +1287,21 @@ impl<A: DesktopApp> Desktop<A> {
                         PairView { pair, cards }
                     })
                     .collect();
+                let signed_in = self.signed_in(&name);
+                // The assigned account's limits; before one is assigned, those
+                // of the account signed in, when its organization is plain.
+                let org = account.clone().or_else(|| {
+                    let account = signed_in.as_deref()?;
+                    let mut theirs = pairs
+                        .iter()
+                        .filter(|p| p.pair.split('/').next() == Some(account));
+                    let only = theirs.next()?;
+                    theirs.next().is_none().then(|| only.pair.clone())
+                });
+                let limits = org.and_then(|pair| {
+                    let org = pair.split('/').nth(1)?.to_owned();
+                    limits::read(&self.paths.root.join(&name), &org)
+                });
                 ProfileView {
                     current: overview.current.as_deref() == Some(name.as_str()),
                     name,
@@ -1272,6 +1311,8 @@ impl<A: DesktopApp> Desktop<A> {
                     autosync,
                     autosync_error,
                     label,
+                    signed_in,
+                    limits,
                 }
             })
             .collect();

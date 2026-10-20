@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use pitstop_core::engine::AccountUsage;
 use pitstop_core::usage::UsageReport;
 
-use crate::model::{AccountView, Suggestion, ToolView, UsageView, WindowView};
+use crate::model::{Suggestion, WindowView};
 
 /// How long a reading that worked stands in for reads that failed.
 pub const KEEP_GOOD_FOR: i64 = 15 * 60;
@@ -183,13 +183,6 @@ pub fn used_now(w: &WindowView, now: i64) -> f64 {
     }
 }
 
-fn windows_of(account: &AccountView) -> Option<&[WindowView]> {
-    match &account.usage {
-        Some(UsageView::Ok { windows }) => Some(windows),
-        _ => None,
-    }
-}
-
 /// A run-out to notify: the account in use of `provider` has used up
 /// `window`, and `to` still has room.
 #[derive(Debug, Clone, PartialEq)]
@@ -203,7 +196,6 @@ pub struct Notice {
 
 /// The suggestions not notified yet. `sent` holds the keys already notified.
 pub fn run_out_notices(
-    tools: &[ToolView],
     suggestions: &[Suggestion],
     sent: &HashSet<String>,
     now: i64,
@@ -211,20 +203,16 @@ pub fn run_out_notices(
     suggestions
         .iter()
         .filter_map(|s| {
-            let tool = tools.iter().find(|t| t.id == s.provider)?;
-            let active = tool.accounts.iter().find(|a| a.name == s.from)?;
-            let window = windows_of(active)?.iter().find(|w| w.label == s.window)?;
             // A reading from before the limit reset says nothing about now.
-            if window.resets_at.is_some_and(|at| at <= now) {
+            if s.resets_at.is_some_and(|at| at <= now) {
                 return None;
             }
-            let resets_at = window.resets_at;
             let key = format!(
                 "{}|{}|{}|{}",
                 s.provider,
                 s.from,
                 s.window,
-                resets_at.unwrap_or(0)
+                s.resets_at.unwrap_or(0)
             );
             (!sent.contains(&key)).then(|| Notice {
                 key,
@@ -240,7 +228,6 @@ pub fn run_out_notices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::LiveView;
 
     const NOW: i64 = 1_800_000_000;
 
@@ -369,60 +356,24 @@ mod tests {
         assert_eq!(kept[0].report, UsageReport::Unauthorized);
     }
 
-    fn window(label: &str, percent: f64, resets_in: Option<i64>) -> WindowView {
-        WindowView {
-            label: label.into(),
-            percent,
-            resets_at: resets_in.map(|s| NOW + s),
-            length_secs: None,
-        }
-    }
-
-    fn account(name: &str, in_use: bool, usage: Option<UsageView>) -> AccountView {
-        AccountView {
-            name: name.into(),
-            label: None,
-            plan: None,
-            in_use,
-            parked_at: None,
-            usage,
-        }
-    }
-
-    fn ok(windows: Vec<WindowView>) -> Option<UsageView> {
-        Some(UsageView::Ok { windows })
-    }
-
-    fn codex(accounts: Vec<AccountView>) -> ToolView {
-        ToolView {
-            id: "codex",
-            name: "Codex",
-            installed: Some(true),
-            app_running: None,
-            live: LiveView::Account {
-                name: "ben1".into(),
-            },
-            accounts,
-        }
-    }
-
     // ---- automatic switch
 
     // ---- run-out notices
 
-    #[test]
-    fn a_run_out_is_notified_once_per_limit_and_reset() {
-        let tools = vec![codex(vec![
-            account("ben1", true, ok(vec![window("5h", 100.0, Some(600))])),
-            account("ben2", false, ok(vec![window("5h", 21.0, None)])),
-        ])];
-        let suggestions = vec![Suggestion {
+    fn run_out(resets_in: Option<i64>) -> Vec<Suggestion> {
+        vec![Suggestion {
             provider: "codex",
             from: "ben1".into(),
             to: "ben2".into(),
             window: "5h".into(),
-        }];
-        let first = run_out_notices(&tools, &suggestions, &HashSet::new(), NOW);
+            resets_at: resets_in.map(|s| NOW + s),
+        }]
+    }
+
+    #[test]
+    fn a_run_out_is_notified_once_per_limit_and_reset() {
+        let suggestions = run_out(Some(600));
+        let first = run_out_notices(&suggestions, &HashSet::new(), NOW);
         assert_eq!(first.len(), 1);
         assert_eq!(
             (
@@ -433,24 +384,14 @@ mod tests {
             ("ben1", "ben2", "5h")
         );
         let sent: HashSet<String> = first.iter().map(|n| n.key.clone()).collect();
-        assert!(run_out_notices(&tools, &suggestions, &sent, NOW).is_empty());
+        assert!(run_out_notices(&suggestions, &sent, NOW).is_empty());
+        // The next period's run-out is news again.
+        assert_eq!(run_out_notices(&run_out(Some(18_600)), &sent, NOW).len(), 1);
     }
-
-    // ---- readings older than a reset
 
     #[test]
     fn a_limit_past_its_reset_is_not_notified_until_read_again() {
-        let tool = codex(vec![
-            account("ben1", true, ok(vec![window("5h", 100.0, Some(-60))])),
-            account("ben2", false, ok(vec![window("5h", 10.0, None)])),
-        ]);
-        let suggestions = vec![Suggestion {
-            provider: "codex",
-            from: "ben1".into(),
-            to: "ben2".into(),
-            window: "5h".into(),
-        }];
-        assert!(run_out_notices(&[tool], &suggestions, &HashSet::new(), NOW).is_empty());
+        assert!(run_out_notices(&run_out(Some(-60)), &HashSet::new(), NOW).is_empty());
     }
 
     #[test]

@@ -279,8 +279,7 @@ fn duties(app: &AppHandle) {
         let Ok(mut auto) = state.automatic.lock() else {
             return;
         };
-        let fresh =
-            duty::run_out_notices(&snapshot.tools, &snapshot.suggestions, &auto.sent, now());
+        let fresh = duty::run_out_notices(&snapshot.suggestions, &auto.sent, now());
         auto.sent.extend(fresh.iter().map(|n| n.key.clone()));
         fresh
     };

@@ -127,10 +127,13 @@ pub struct WindowView {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Suggestion {
+    /// `codex` or `claude-desktop`.
     pub provider: &'static str,
     pub from: String,
     pub to: String,
     pub window: String,
+    /// When the used-up limit resets, to notify it once per period.
+    pub resets_at: Option<i64>,
 }
 
 /// An error as the UI shows it: a code to translate, and the English
@@ -296,8 +299,67 @@ pub fn build<H: Host>(engine: &Engine<H>, input: &Input) -> Snapshot {
             }
         }
     }
-    snapshot.suggestions = suggestions(&snapshot.tools);
+    #[cfg(unix)]
+    for w in snapshot
+        .desktop
+        .iter_mut()
+        .flat_map(|d| d.profiles.iter_mut())
+        .filter_map(|p| p.limits.as_mut())
+        .flat_map(|l| l.windows.iter_mut())
+    {
+        if w.resets_at.is_some_and(|at| at <= input.now) {
+            w.percent = 0.0;
+        }
+    }
+    let mut tools = snapshot.tools.clone();
+    tools.extend(desktop_tool(&snapshot));
+    snapshot.suggestions = suggestions(&tools);
     snapshot
+}
+
+pub const DESKTOP_ID: &str = "claude-desktop";
+
+/// Claude Desktop's profiles as a tool with accounts, so running out
+/// suggests and notifies a switch, and the tray reads their limits, as for
+/// Codex. Not shown as one: the window draws profiles its own way.
+#[cfg(unix)]
+pub fn desktop_tool(snapshot: &Snapshot) -> Option<ToolView> {
+    let desktop = snapshot.desktop.as_ref().filter(|d| d.state == "ready")?;
+    Some(ToolView {
+        id: DESKTOP_ID,
+        name: DESKTOP_NAME,
+        installed: Some(true),
+        app_running: Some(desktop.running),
+        live: LiveView::LoggedOut,
+        accounts: desktop
+            .profiles
+            .iter()
+            .map(|p| AccountView {
+                name: p.name.clone(),
+                label: p.label.clone(),
+                plan: None,
+                in_use: p.current,
+                parked_at: None,
+                usage: p.limits.as_ref().map(|l| UsageView::Ok {
+                    windows: l
+                        .windows
+                        .iter()
+                        .map(|w| WindowView {
+                            label: w.label.clone(),
+                            percent: w.percent,
+                            resets_at: w.resets_at,
+                            length_secs: w.length_secs,
+                        })
+                        .collect(),
+                }),
+            })
+            .collect(),
+    })
+}
+
+#[cfg(not(unix))]
+pub fn desktop_tool(_snapshot: &Snapshot) -> Option<ToolView> {
+    None
 }
 
 impl From<&UsageReport> for UsageView {
@@ -357,6 +419,7 @@ fn suggestions(tools: &[ToolView]) -> Vec<Suggestion> {
                 from: active.name.clone(),
                 to: to.name.clone(),
                 window: full.label.clone(),
+                resets_at: full.resets_at,
             })
         })
         .collect()
@@ -469,12 +532,20 @@ pub fn menu(snapshot: &Snapshot, lang: Lang, clock: &dyn Fn(i64) -> String) -> V
             lines.push(MenuLine::Separator);
         }
         lines.push(MenuLine::Heading(DESKTOP_NAME.into()));
+        let tool = desktop_tool(snapshot);
         for (title, name, current) in profiles {
             lines.push(MenuLine::Account {
                 id: format!("desktop|{name}"),
                 title,
                 checked: current,
             });
+            let line = tool
+                .as_ref()
+                .and_then(|t| t.accounts.iter().find(|a| a.name == name))
+                .and_then(|a| account_line(a, lang, snapshot.now));
+            if let Some(line) = line {
+                lines.push(MenuLine::Note(line));
+            }
         }
     }
 
@@ -759,6 +830,7 @@ mod tests {
                 from: "work".into(),
                 to: "spare".into(),
                 window: "5h".into(),
+                resets_at: Some(NOW + 2 * 3_600 + 9 * 60),
             }]
         );
     }
@@ -849,6 +921,8 @@ mod tests {
             autosync: AutoSync::default(),
             autosync_error: None,
             label: None,
+            signed_in: None,
+            limits: None,
         };
         let mut overview = Overview::broken(String::new());
         overview.state = "notSetUp";
@@ -935,6 +1009,88 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_used_up_claude_desktop_profile_suggests_the_one_with_room() {
+        use pitstop_core::desktop::limits::{LimitWindow, Limits};
+        use pitstop_core::desktop::{AutoSync, ProfileView};
+        let engine = work_and_personal();
+        let limits = |percent, resets_in: i64| Limits {
+            read_at: NOW - 300,
+            windows: vec![LimitWindow {
+                label: "5h".into(),
+                percent,
+                resets_at: Some(NOW + resets_in),
+                resets_by: None,
+                length_secs: Some(18_000),
+                estimated: true,
+            }],
+        };
+        let profile = |name: &str, current, limits| ProfileView {
+            name: name.into(),
+            current,
+            account: Some(format!("{name}/org")),
+            account_error: None,
+            pairs: Vec::new(),
+            autosync: AutoSync::default(),
+            autosync_error: None,
+            label: None,
+            signed_in: None,
+            limits: Some(limits),
+        };
+        let mut overview = Overview::broken(String::new());
+        overview.state = "ready";
+        overview.profiles = vec![
+            profile("tk1", true, limits(100.0, 3_600)),
+            profile("tk2", false, limits(20.0, 600)),
+        ];
+        let settings = Settings::default();
+        let input = |desktop| Input {
+            revision: 1,
+            now: NOW,
+            usage: &[],
+            reading: false,
+            updated_at: Some(NOW),
+            installed: &[],
+            settings: &settings,
+            language: Lang::En,
+            autostart: false,
+            codex_running: None,
+            desktop,
+        };
+        let snapshot = build(&engine, &input(Some(overview.clone())));
+        assert_eq!(
+            snapshot.suggestions,
+            [Suggestion {
+                provider: DESKTOP_ID,
+                from: "tk1".into(),
+                to: "tk2".into(),
+                window: "5h".into(),
+                resets_at: Some(NOW + 3_600),
+            }]
+        );
+        let lines = menu(&snapshot, Lang::En, &clock);
+        assert_eq!(
+            lines[0],
+            MenuLine::Action {
+                id: "suggest|claude-desktop|tk2".into(),
+                title: "Switch to tk2".into(),
+                enabled: true,
+            }
+        );
+        assert!(
+            notes(&lines).contains(&"5-hour used up, resets in 1h 00m"),
+            "{lines:?}"
+        );
+
+        // Past its estimated reset, a limit reads as unused: nothing to suggest.
+        overview.profiles[0].limits = Some(limits(100.0, -60));
+        let snapshot = build(&engine, &input(Some(overview)));
+        assert!(snapshot.suggestions.is_empty());
+        let tk1 = &snapshot.desktop.unwrap().profiles[0];
+        assert_eq!(tk1.limits.as_ref().unwrap().windows[0].percent, 0.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn codex_gets_a_heading_once_claude_desktop_profiles_are_listed() {
         use pitstop_core::desktop::{AutoSync, ProfileView};
         let engine = work_and_personal();
@@ -961,6 +1117,8 @@ mod tests {
             autosync: AutoSync::default(),
             autosync_error: None,
             label: None,
+            signed_in: None,
+            limits: None,
         }];
         snapshot.desktop = Some(overview);
         assert_eq!(headings(&snapshot), ["Codex", DESKTOP_NAME]);

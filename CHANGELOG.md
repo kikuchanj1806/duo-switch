@@ -3,6 +3,13 @@
 Release notes are taken from the section headed `## [X.Y.Z]` matching the tag
 `vX.Y.Z`: rename `Unreleased` to the version and date when releasing.
 
+## [Unreleased]
+
+- Claude Desktop: each profile shows its five-hour and weekly limits, read
+  from the usage Claude Desktop records itself, with estimated reset times
+  and pace; running out suggests (and notifies) a switch to a profile with
+  room. Assigning an account picks the one signed in and asks for its email.
+
 ## [0.5.0] - 2026-10-20
 
 - Claude Desktop: switch between profiles (one account each), assign each its
