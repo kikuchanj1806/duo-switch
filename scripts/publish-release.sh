@@ -77,7 +77,9 @@ cat dist/latest.json
   echo "Each download has a \`.sha256\` checksum next to it. The \`.sig\` files and \`latest.json\` are for the app's own updater."
 } >>"$notes"
 
-gh release create "$tag" --title "Duo Switch $tag" --notes-file "$notes" dist/*
+# Only what a release ships: no logs or other strays left in dist/.
+gh release create "$tag" --title "Duo Switch $tag" --notes-file "$notes" \
+  dist/*.dmg dist/*.tar.gz dist/*.sig dist/*.sha256 dist/latest.json
 rm -f "$notes"
 echo
 echo "Published: https://github.com/$repo/releases/tag/$tag"
