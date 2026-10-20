@@ -3,7 +3,7 @@
 Release notes are taken from the section headed `## [X.Y.Z]` matching the tag
 `vX.Y.Z`: rename `Unreleased` to the version and date when releasing.
 
-## [Unreleased]
+## [0.5.1] - 2026-10-20
 
 - Claude Desktop: each profile shows its five-hour and weekly limits, read
   from the usage Claude Desktop records itself, with estimated reset times
