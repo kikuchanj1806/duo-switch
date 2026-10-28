@@ -15,6 +15,10 @@ struct World {
 /// A home with Claude Desktop's own folder (signed in, with caches) and
 /// Claude Code's history folder.
 fn world_with(app: FakeApp) -> World {
+    world_keeping(app, KEEP_BACKUPS)
+}
+
+fn world_keeping(app: FakeApp, keep: usize) -> World {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().to_path_buf();
     let app_data = home.join("Library/Application Support/Claude");
@@ -22,7 +26,9 @@ fn world_with(app: FakeApp) -> World {
     fs::write(app_data.join("Cache/blob"), "cache").unwrap();
     fs::write(app_data.join("Cookies"), "signed in as A").unwrap();
     fs::create_dir_all(home.join(".claude/projects/-Users-me-app")).unwrap();
-    let d = Desktop::new(Paths::new(&home, true), app).unwrap();
+    let d = Desktop::new(Paths::new(&home, true), app)
+        .unwrap()
+        .keeping(keep);
     World { _dir: dir, home, d }
 }
 
@@ -248,9 +254,13 @@ fn sync_adds_cards_with_the_target_identity_and_only_once() {
     assert_eq!(written["accountUuid"], "bbb");
     assert_eq!(written["organizationUuid"], "b0b");
     assert_eq!(written["title"], "Fix it");
-    assert!(Path::new(report.backup.as_deref().unwrap())
-        .join("manifest.json")
-        .exists());
+    let backup = Path::new(report.backup.as_deref().unwrap());
+    let manifest = read_json(&backup.join("manifest.json"));
+    assert_eq!(manifest["added"], json!(["local_1.json"]));
+    assert!(
+        !backup.join("cards").exists(),
+        "a sync's backup lists the cards it adds, it does not copy the folder"
+    );
     // The source card is as it was.
     let source = read_json(
         &w.root()
@@ -467,4 +477,153 @@ fn the_real_app_folder_is_never_replaced_by_a_link() {
     fs::create_dir_all(w.root().join("tk9")).unwrap();
     assert_eq!(code(w.d.point_to("tk9")), "desktopUnsafe");
     assert!(w.d.paths().app_data.join("Cookies").exists());
+}
+
+/// The backups `<prefix><stamp>` of a profile, as switching and syncing make them.
+fn stamped(w: &World, prefix: &str) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = w
+        .backups_named(prefix)
+        .into_iter()
+        .filter(|p| is_stamp(&p.file_name().unwrap().to_string_lossy()[prefix.len()..]))
+        .collect();
+    found.sort();
+    found
+}
+
+#[test]
+fn a_backup_leaves_out_caches_at_any_depth() {
+    let w = world();
+    w.d.setup("tk1").unwrap();
+    let partition = w.root().join("tk1/Partitions/preview");
+    for dir in ["Cache", "Code Cache", "GPUCache", "Local Storage"] {
+        fs::create_dir_all(partition.join(dir)).unwrap();
+        fs::write(partition.join(dir).join("f"), "x").unwrap();
+    }
+    w.d.add("tk2").unwrap();
+    let copy = stamped(&w, "tk1-")[0].join("profile/Partitions/preview");
+    assert!(copy.join("Local Storage/f").exists());
+    for dir in ["Cache", "Code Cache", "GPUCache"] {
+        assert!(!copy.join(dir).exists(), "{dir} stays out");
+    }
+    assert!(
+        w.root().join("tk1/Partitions/preview/Cache/f").exists(),
+        "the profile keeps its own"
+    );
+}
+
+#[test]
+fn switching_keeps_only_the_newest_backups_of_the_profile() {
+    let w = world_keeping(FakeApp::default(), 2);
+    w.two_profiles();
+    let history = w.root().join("_backups/tk1-20200101-000000-0000000a");
+    fs::create_dir_all(&history).unwrap();
+    fs::write(
+        history.join("manifest.json"),
+        card::to_bytes(&json!({"complete": true, "kind": "profile", "profile": "tk1", "history_included": true})),
+    )
+    .unwrap();
+    let unknown = w.root().join("_backups/tk1-20200101-000000-0000000b");
+    fs::create_dir_all(&unknown).unwrap();
+    fs::create_dir_all(w.root().join("tk1-x")).unwrap();
+    w.d.backup("tk1-x").unwrap();
+
+    let mut newest = None;
+    for _ in 0..4 {
+        w.d.switch("tk1").unwrap();
+        newest = w.d.switch("tk2").unwrap().backup;
+    }
+    let kept = stamped(&w, "tk1-");
+    // Two of the profile's own, plus the backup with transcripts and the
+    // folder without a manifest, which are never removed.
+    assert_eq!(kept.len(), 4, "{kept:?}");
+    assert!(newest.unwrap().exists());
+    assert!(history.exists() && unknown.exists());
+    assert_eq!(stamped(&w, "tk2-").len(), 2);
+    assert_eq!(
+        w.backups_named("tk1-x-").len(),
+        1,
+        "another profile's backups are its own"
+    );
+}
+
+#[test]
+fn keeping_none_keeps_every_backup() {
+    let w = world_keeping(FakeApp::default(), 0);
+    w.two_profiles();
+    for _ in 0..4 {
+        w.d.switch("tk1").unwrap();
+        w.d.switch("tk2").unwrap();
+    }
+    // tk2 was made empty, so only the four switches away from it backed it up.
+    assert_eq!(stamped(&w, "tk2-").len(), 4);
+}
+
+#[test]
+fn clean_frees_caches_old_versions_and_old_backups_but_not_sessions() {
+    let w = world_keeping(FakeApp::default(), 1);
+    w.two_profiles();
+    for profile in ["tk1", "tk2"] {
+        let p = w.root().join(profile);
+        for dir in [
+            "Cache",
+            "Partitions/preview/Code Cache",
+            "claude-code/2.1.9",
+            "claude-code/2.1.10",
+        ] {
+            fs::create_dir_all(p.join(dir)).unwrap();
+            fs::write(p.join(dir).join("f"), "x".repeat(10_000)).unwrap();
+        }
+        fs::create_dir_all(p.join("Partitions/preview/Local Storage")).unwrap();
+    }
+    w.card(
+        "tk1",
+        "aaa/a0a",
+        "local_1.json",
+        json!({"cliSessionId": "s1"}),
+    );
+    w.d.switch("tk1").unwrap();
+    w.d.switch("tk2").unwrap();
+    // One made before keeping was this strict, as `claude-switch` 2.0.0 left them.
+    let old = w.root().join("_backups/tk1-20200101-000000-0000000c");
+    fs::create_dir_all(old.join("profile")).unwrap();
+    fs::write(
+        old.join("manifest.json"),
+        card::to_bytes(&json!({"complete": true, "kind": "profile", "profile": "tk1", "history_included": false})),
+    )
+    .unwrap();
+
+    let before = w.d.storage().unwrap();
+    let tk1 = before.profiles.iter().find(|p| p.name == "tk1").unwrap();
+    assert!(tk1.caches > 0 && tk1.old_versions > 0 && !tk1.current);
+    assert!(before.old_backups > 0);
+
+    let report = w.d.clean().unwrap();
+    assert_eq!(report.profiles, ["tk1"], "the profile in use is left alone");
+    assert!(report.freed > 0 && report.backups_removed > 0);
+    let tk1 = w.root().join("tk1");
+    assert!(!tk1.join("Cache").exists());
+    assert!(!tk1.join("Partitions/preview/Code Cache").exists());
+    assert!(tk1.join("Partitions/preview/Local Storage").exists());
+    assert!(!tk1.join("claude-code/2.1.9").exists());
+    assert!(
+        tk1.join("claude-code/2.1.10").exists(),
+        "the newest version stays"
+    );
+    assert!(tk1.join(SESSIONS).join("aaa/a0a/local_1.json").exists());
+    assert!(w.root().join("tk2/Cache").exists());
+    assert!(w.root().join("tk2/claude-code/2.1.9").exists());
+    assert_eq!(stamped(&w, "tk1-").len(), 1);
+
+    let after = w.d.storage().unwrap();
+    assert_eq!(after.old_backups, 0);
+}
+
+#[test]
+fn stamps_and_versions_are_read_strictly() {
+    assert!(is_stamp("20261020-091500-1a2b3c4d"));
+    assert!(!is_stamp("x-20261020-091500-1a2b3c4d"));
+    assert!(!is_stamp("20261020-091500"));
+    assert_eq!(version("2.1.309"), Some(vec![2, 1, 309]));
+    assert!(version("2.1.309").unwrap() > version("2.1.98").unwrap());
+    assert_eq!(version("latest"), None);
 }

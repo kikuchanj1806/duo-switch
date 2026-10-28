@@ -58,6 +58,8 @@ macro_rules! handlers {
             desktop::desktop_sync,
             desktop::desktop_add,
             desktop::desktop_setup,
+            desktop::desktop_storage,
+            desktop::desktop_clean,
         ]
     };
 }

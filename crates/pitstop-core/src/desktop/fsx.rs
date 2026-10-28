@@ -114,6 +114,12 @@ pub fn replace_write(path: &Path, data: &[u8]) -> Result<()> {
 /// Copy a file, a folder or a symlink; a symlink is copied as the link, never
 /// followed. Files keep their times, as Python's `copy2` keeps them.
 pub fn copy_entry(source: &Path, target: &Path) -> Result<()> {
+    copy_entry_skipping(source, target, &[])
+}
+
+/// As [`copy_entry`], leaving out every real folder, at any depth, whose name
+/// is in `skip`.
+pub fn copy_entry_skipping(source: &Path, target: &Path, skip: &[&str]) -> Result<()> {
     let meta = fs::symlink_metadata(source).map_err(|e| io(source, e))?;
     if meta.file_type().is_symlink() {
         let to = fs::read_link(source).map_err(|e| io(source, e))?;
@@ -123,7 +129,11 @@ pub fn copy_entry(source: &Path, target: &Path) -> Result<()> {
         fs::set_permissions(target, meta.permissions()).map_err(|e| io(target, e))?;
         for entry in fs::read_dir(source).map_err(|e| io(source, e))? {
             let entry = entry.map_err(|e| io(source, e))?;
-            copy_entry(&entry.path(), &target.join(entry.file_name()))?;
+            let name = entry.file_name();
+            if skip.contains(&name.to_string_lossy().as_ref()) && is_real_dir(&entry.path()) {
+                continue;
+            }
+            copy_entry_skipping(&entry.path(), &target.join(&name), skip)?;
         }
         Ok(())
     } else {
@@ -137,6 +147,26 @@ pub fn copy_entry(source: &Path, target: &Path) -> Result<()> {
             .and_then(|f| f.set_times(times))
             .map_err(|e| io(target, e))
     }
+}
+
+/// The disk space under `path`, symlinks not followed, as `du` counts it;
+/// what cannot be read counts as nothing.
+pub fn disk_usage(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    let own = meta.blocks() * 512;
+    if !meta.is_dir() {
+        return own;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return own;
+    };
+    own + entries
+        .filter_map(|e| e.ok())
+        .map(|e| disk_usage(&e.path()))
+        .sum::<u64>()
 }
 
 /// Every `local_*.json` directly in `dir`, files or not.
@@ -204,6 +234,26 @@ mod tests {
             fs::read_link(dir.path().join("dst/link")).unwrap(),
             Path::new("/nowhere")
         );
+    }
+
+    #[test]
+    fn a_copy_can_leave_out_folders_at_any_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("Partitions/p/Cache")).unwrap();
+        fs::create_dir_all(src.join("Partitions/p/Local Storage")).unwrap();
+        fs::write(src.join("Partitions/p/Cache/blob"), "x").unwrap();
+        fs::write(src.join("Partitions/p/Local Storage/kv"), "x").unwrap();
+        fs::write(
+            src.join("Partitions/p/Cache.json"),
+            "a file keeps its place",
+        )
+        .unwrap();
+        copy_entry_skipping(&src, &dir.path().join("dst"), &["Cache"]).unwrap();
+        let dst = dir.path().join("dst/Partitions/p");
+        assert!(!dst.join("Cache").exists());
+        assert!(dst.join("Local Storage/kv").exists());
+        assert!(dst.join("Cache.json").exists());
     }
 
     #[test]

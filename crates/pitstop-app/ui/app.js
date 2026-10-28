@@ -1820,6 +1820,14 @@ function desktopManage(d) {
       ),
     );
   }
+  rows.push(
+    h(
+      "div",
+      { class: "setting-row" },
+      h("div", null, h("div", { class: "setting-name", text: t("desktopStorageTitle") }), h("p", { class: "help", text: t("desktopStorageHelp") })),
+      keyed(button(t("desktopStorageButton"), () => openDesktopStorage(), "compact"), "desktop-storage"),
+    ),
+  );
   for (const p of d.profiles) {
     const on = p.autosync.enabled;
     const others = d.profiles.filter((o) => o.name !== p.name && o.account).map((o) => o.name);
@@ -1915,6 +1923,40 @@ function openDesktopSync() {
 
 function openDesktopAdd() {
   openDialog({ type: "desktopAdd", name: "", error: null, busy: false });
+}
+
+function openDesktopStorage() {
+  const model = { type: "desktopStorage", phase: "loading", storage: null, report: null, error: null };
+  openDialog(model);
+  invoke("desktop_storage").then(
+    (storage) => {
+      model.storage = storage;
+      model.phase = "ready";
+      if (dialog === model) renderDialog();
+    },
+    (error) => {
+      model.error = error;
+      model.phase = "failed";
+      if (dialog === model) renderDialog();
+    },
+  );
+}
+
+/** Bytes as people read them: `1.4 GB`, `263 MB`. */
+function formatBytes(n) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  const digits = i >= 3 && n < 100 ? 1 : 0;
+  return `${n.toLocaleString(LANG === "vi" ? "vi-VN" : "en-GB", { maximumFractionDigits: digits })} ${units[i]}`;
+}
+
+/** What a clean-up would free: the profiles not in use, and old backups. */
+function freeable(storage) {
+  return storage.profiles.filter((p) => !p.current).reduce((sum, p) => sum + p.caches + p.oldVersions, storage.oldBackups);
 }
 
 function openDesktopSetup() {
@@ -2112,6 +2154,61 @@ Object.assign(DIALOGS, {
         h("span", { class: "spacer" }),
         keyed(button(t("cancel"), closeDialog), "cancel"),
         keyed(h("button", { class: "button primary", disabled: !r.added, onclick: run }, t("desktopSyncButton", { n: r.added })), "primary"),
+      ),
+    ];
+  },
+
+  desktopStorage() {
+    const d = dialog;
+    const run = async () => {
+      d.phase = "running";
+      renderDialog();
+      try {
+        d.report = await invoke("desktop_clean");
+        d.phase = "done";
+      } catch (error) {
+        d.error = error;
+        d.phase = "failed";
+      }
+      renderDialog();
+    };
+    const title = t("desktopStorageTitle");
+    const ok = buttons(h("span", { class: "spacer" }), keyed(button(t("ok"), closeDialog, "primary"), "primary"));
+    if (d.phase === "loading" || d.phase === "running") {
+      return [
+        sheetHead(title, d.phase === "running" ? t("desktopStorageRunning") : t("desktopStorageLoading")),
+        buttons(h("div", { class: "waiting", role: "status" }, h("div", { class: "spinner" }), t("reading")), h("span", { class: "spacer" })),
+      ];
+    }
+    if (d.phase === "failed") {
+      return [sheetHead(title, null), failureBox(t("desktopStorageFailed"), d.error), ok];
+    }
+    if (d.phase === "done") {
+      return [
+        sheetHead(t("desktopStorageDone", { size: formatBytes(d.report.freed) }), t("desktopStorageDoneHelp", { names: d.report.profiles.join(", ") || "–", n: d.report.backupsRemoved }), { tone: "accent", icon: "check" }),
+        ok,
+      ];
+    }
+    const s = d.storage;
+    const line = (text) => h("p", { class: "footnote", text });
+    const lines = s.profiles.map((p) =>
+      line(
+        p.current
+          ? t("desktopStorageCurrent", { name: p.name, size: formatBytes(p.bytes) })
+          : t("desktopStorageProfile", { name: p.name, size: formatBytes(p.bytes), free: formatBytes(p.caches + p.oldVersions) }),
+      ),
+    );
+    lines.push(line(t("desktopStorageBackups", { size: formatBytes(s.backups), old: formatBytes(s.oldBackups), keep: s.keep })));
+    lines.push(line(t("desktopStorageShared", { size: formatBytes(s.shared) })));
+    lines.push(line(t("desktopStorageTranscripts", { size: formatBytes(s.transcripts) })));
+    const free = freeable(s);
+    return [
+      sheetHead(title, free ? t("desktopStorageMessage") : t("desktopStorageNothing")),
+      h("div", { class: "form" }, lines),
+      buttons(
+        h("span", { class: "spacer" }),
+        keyed(button(t("cancel"), closeDialog), "cancel"),
+        keyed(h("button", { class: "button primary", disabled: !free, onclick: run }, t("desktopStorageClean", { size: formatBytes(free) })), "primary"),
       ),
     ];
   },

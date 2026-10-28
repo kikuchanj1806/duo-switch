@@ -4,7 +4,7 @@
 //! touches files or the app runs off the UI thread.
 
 use pitstop_core::desktop::{
-    AutoSync, Desktop, DesktopApp, MacApp, NoApp, Overview, Paths, SyncReport,
+    AutoSync, CleanReport, Desktop, DesktopApp, MacApp, NoApp, Overview, Paths, Storage, SyncReport,
 };
 use pitstop_core::Host;
 use serde::Serialize;
@@ -178,4 +178,22 @@ pub async fn desktop_add(app: AppHandle, name: String) -> Answer<()> {
 #[tauri::command]
 pub async fn desktop_setup(app: AppHandle, name: String) -> Answer<()> {
     blocking(move || change(&app, |d| d.setup(&name))).await
+}
+
+/// Where the disk space under the profiles goes. Reads only.
+#[tauri::command]
+pub async fn desktop_storage() -> Answer<Storage> {
+    blocking(move || {
+        profiles()
+            .and_then(|d| d.storage())
+            .map_err(|e| UiError::from(&e))
+    })
+    .await
+}
+
+/// Free the caches, older Claude Code versions and old backups of the
+/// profiles not in use.
+#[tauri::command]
+pub async fn desktop_clean(app: AppHandle) -> Answer<CleanReport> {
+    blocking(move || change(&app, |d| d.clean())).await
 }

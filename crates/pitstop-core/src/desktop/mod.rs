@@ -7,8 +7,9 @@
 //! - `_meta/<name>.account` names the profile's `account/organization`
 //!   folder under `claude-code-sessions/`, and `_meta/<name>.autosync.json`
 //!   whether switching to it brings the other profiles' sessions along;
-//! - `_backups/` keeps a copy of a profile before each switch and of the
-//!   cards before each sync; nothing here ever deletes one;
+//! - `_backups/` keeps a copy of a profile before each switch, less its
+//!   caches at any depth, and before each sync the list of cards it adds;
+//!   only the newest few of each per profile are kept (see [`KEEP_BACKUPS`]);
 //! - `_meta/.claude-switch.lock` keeps one change at a time, across both.
 //!
 //! A sync copies Code Local session cards (`local_*.json`) from the source
@@ -128,18 +129,32 @@ const COMMANDS: [&str; 17] = [
     "restore",
     "import",
 ];
-/// Left out of a profile's backup: caches, and the large VM bundles.
-const EXCLUDES: [&str; 8] = [
+/// Chromium's caches, left out of a backup wherever they sit (the preview
+/// browser keeps ~1 GB under `Partitions/<name>/Cache`); the app makes them
+/// again.
+const CACHE_DIRS: [&str; 6] = [
     "Cache",
     "Code Cache",
     "GPUCache",
     "DawnGraphiteCache",
     "DawnWebGPUCache",
+    "GraphiteDawnCache",
+];
+/// Left out at the top of a profile's backup: the large folders the app
+/// downloads again by itself.
+const EXCLUDES: [&str; 3] = ["vm_bundles", "claude-code", "claude-code-vm"];
+/// Backups of each kind kept per profile, the newest; `0` keeps them all.
+/// `CLAUDE_SWITCH_KEEP_BACKUPS` sets it, for `claude-switch` too.
+pub const KEEP_BACKUPS: usize = 3;
+const SESSIONS: &str = "claude-code-sessions";
+/// What a clean-up never walks into looking for caches.
+const KEEP_OUT: [&str; 5] = [
     "vm_bundles",
     "claude-code",
     "claude-code-vm",
+    SESSIONS,
+    "local-agent-mode-sessions",
 ];
-const SESSIONS: &str = "claude-code-sessions";
 const MAX_LABEL: usize = 100;
 
 pub fn valid_name(name: &str) -> Result<&str> {
@@ -299,6 +314,43 @@ pub struct SyncReport {
     pub backup: Option<String>,
 }
 
+/// The disk space one profile takes, and how much of it a clean-up frees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileStorage {
+    pub name: String,
+    pub current: bool,
+    pub bytes: u64,
+    /// Chromium caches, at any depth.
+    pub caches: u64,
+    /// Claude Code versions older than the newest one in the profile.
+    pub old_versions: u64,
+}
+
+/// Where the disk space under the profiles goes. Reads only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Storage {
+    pub profiles: Vec<ProfileStorage>,
+    pub backups: u64,
+    /// Backups past the newest [`KEEP_BACKUPS`] of each kind.
+    pub old_backups: u64,
+    pub shared: u64,
+    /// `~/.claude/projects`: the transcripts, never touched here.
+    pub transcripts: u64,
+    pub keep: usize,
+}
+
+/// What a clean-up removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanReport {
+    /// The profiles cleaned: every one but the one in use.
+    pub profiles: Vec<String>,
+    pub freed: u64,
+    pub backups_removed: usize,
+}
+
 #[derive(Debug)]
 pub struct SwitchReport {
     pub from: String,
@@ -330,6 +382,34 @@ pub struct Lock(#[allow(dead_code)] fs::File);
 pub struct Desktop<A: DesktopApp> {
     paths: Paths,
     app: A,
+    keep: usize,
+}
+
+/// [`KEEP_BACKUPS`], or `CLAUDE_SWITCH_KEEP_BACKUPS`; a value that is not a
+/// whole number keeps every backup rather than stop a switch half-way.
+fn keep_from_env() -> usize {
+    match std::env::var("CLAUDE_SWITCH_KEEP_BACKUPS") {
+        Err(_) => KEEP_BACKUPS,
+        Ok(value) => value.trim().parse().unwrap_or_else(|_| {
+            eprintln!("warning: CLAUDE_SWITCH_KEEP_BACKUPS={value} is not a whole number; keeping every backup");
+            0
+        }),
+    }
+}
+
+/// `20261020-091500-1a2b3c4d`, as [`fsx::stamp`] makes it.
+fn is_stamp(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 24
+        && b[8] == b'-'
+        && b[15] == b'-'
+        && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
+        && b[16..].iter().all(u8::is_ascii_hexdigit)
+}
+
+/// `2.1.309` as numbers, to find the newest; anything else is not a version.
+fn version(name: &str) -> Option<Vec<u64>> {
+    name.split('.').map(|part| part.parse().ok()).collect()
 }
 
 impl<A: DesktopApp> Desktop<A> {
@@ -349,7 +429,17 @@ impl<A: DesktopApp> Desktop<A> {
                 ));
             }
         }
-        Ok(Desktop { paths, app })
+        Ok(Desktop {
+            paths,
+            app,
+            keep: keep_from_env(),
+        })
+    }
+
+    /// Keep `keep` backups of each kind per profile (`0`: all of them).
+    pub fn keeping(mut self, keep: usize) -> Self {
+        self.keep = keep;
+        self
     }
 
     pub fn paths(&self) -> &Paths {
@@ -787,7 +877,8 @@ impl<A: DesktopApp> Desktop<A> {
         Ok(index)
     }
 
-    /// Copy a profile, less its caches, with its `_meta` files.
+    /// Copy a profile, less its caches, with its `_meta` files; then drop the
+    /// profile's backups past the newest few.
     pub fn backup(&self, name: &str) -> Result<PathBuf> {
         let source = self.profile(name)?;
         self.ensure_meta()?;
@@ -799,10 +890,13 @@ impl<A: DesktopApp> Desktop<A> {
             let entry = entry.map_err(|e| io(&source, e))?;
             let file_name = entry.file_name();
             let n = file_name.to_string_lossy();
-            if EXCLUDES.contains(&n.as_ref()) || n.starts_with("claude-code-sessions.bak-") {
+            if EXCLUDES.contains(&n.as_ref())
+                || CACHE_DIRS.contains(&n.as_ref())
+                || n.starts_with("claude-code-sessions.bak-")
+            {
                 continue;
             }
-            fsx::copy_entry(&entry.path(), &target.join(&file_name))?;
+            fsx::copy_entry_skipping(&entry.path(), &target.join(&file_name), &CACHE_DIRS)?;
         }
         for suffix in [".account", ".autosync.json", ".label"] {
             let meta = self.meta().join(format!("{name}{suffix}"));
@@ -820,19 +914,33 @@ impl<A: DesktopApp> Desktop<A> {
                 "history_included": false,
                 "history_source": self.paths.config.join("projects"),
                 "excludes": EXCLUDES,
+                "cache_dirs_excluded_at_any_depth": CACHE_DIRS,
                 "note": "Not included: the macOS Keychain, or project and worktree folders.",
             })),
         )?;
+        self.prune(name, "profile", &format!("{name}-"));
         Ok(dest)
     }
 
-    fn session_backup(&self, name: &str, pair: &str, path: &Path) -> Result<PathBuf> {
+    /// Before a sync, the names of the cards it is about to add. A sync only
+    /// adds cards and never writes over one, so this list is all it takes to
+    /// undo it: delete those files from `source`.
+    fn session_backup(
+        &self,
+        name: &str,
+        pair: &str,
+        path: &Path,
+        cards: &[Card],
+    ) -> Result<PathBuf> {
         self.ensure_meta()?;
         let dest = self
             .backups()
             .join(format!("sessions-{name}-{}", fsx::stamp()));
         fsx::mkdir_private(&dest)?;
-        fsx::copy_entry(path, &dest.join("cards"))?;
+        let added: Vec<String> = cards
+            .iter()
+            .map(|c| c.filename.to_string_lossy().into_owned())
+            .collect();
         fsx::exclusive_write(
             &dest.join("manifest.json"),
             &card::to_bytes(&json!({
@@ -841,9 +949,183 @@ impl<A: DesktopApp> Desktop<A> {
                 "profile": name,
                 "account_org": pair,
                 "source": path,
+                "added": added,
+                "note": "The sync only adds these cards to `source`; deleting them undoes it.",
             })),
         )?;
+        self.prune(name, "session-cards", &format!("sessions-{name}-"));
         Ok(dest)
+    }
+
+    /// The backups of one kind of profile `name`, oldest first: folders named
+    /// `<prefix><stamp>` whose complete manifest says so. A backup that holds
+    /// the transcripts, or anything else, is never one of them.
+    fn backups_of(&self, name: &str, kind: &str, prefix: &str) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.backups()) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, std::time::SystemTime, PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let file_name = e.file_name().to_string_lossy().into_owned();
+                let stamp = file_name.strip_prefix(prefix)?;
+                if !is_stamp(stamp) || !fsx::is_real_dir(&e.path()) {
+                    return None;
+                }
+                let manifest_path = e.path().join("manifest.json");
+                if !fsx::is_real_file(&manifest_path) {
+                    return None;
+                }
+                let manifest: Value =
+                    serde_json::from_slice(&fs::read(&manifest_path).ok()?).ok()?;
+                let ours = manifest["complete"] == true
+                    && manifest["kind"] == kind
+                    && manifest["profile"] == name
+                    && manifest["history_included"] != true;
+                let written = fs::metadata(&manifest_path)
+                    .and_then(|m| m.modified())
+                    .ok()?;
+                ours.then(|| (stamp[..15].to_owned(), written, e.path()))
+            })
+            .collect();
+        found.sort();
+        found.into_iter().map(|(_, _, path)| path).collect()
+    }
+
+    /// The backups of one kind of `name` past the newest [`KEEP_BACKUPS`].
+    fn old_backups(&self, name: &str, kind: &str, prefix: &str) -> Vec<PathBuf> {
+        if self.keep == 0 {
+            return Vec::new();
+        }
+        let mut found = self.backups_of(name, kind, prefix);
+        found.truncate(found.len().saturating_sub(self.keep));
+        found
+    }
+
+    /// Delete the old backups of one kind of `name`. A backup that will not
+    /// go is said, not raised: the switch or sync it follows stands.
+    fn prune(&self, name: &str, kind: &str, prefix: &str) -> usize {
+        let mut removed = 0;
+        for path in self.old_backups(name, kind, prefix) {
+            match fs::remove_dir_all(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => eprintln!("warning: could not remove {}: {e}", path.display()),
+            }
+        }
+        removed
+    }
+
+    /// The caches in `profile` (a profile folder), at any depth, left as they
+    /// are where the app keeps code, the VM or sessions.
+    fn caches_in(profile: &Path) -> Vec<PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if !fsx::is_real_dir(&path) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if CACHE_DIRS.contains(&name.as_ref()) {
+                    out.push(path);
+                } else if !KEEP_OUT.contains(&name.as_ref())
+                    && !name.starts_with("claude-code-sessions")
+                {
+                    walk(&path, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(profile, &mut out);
+        out
+    }
+
+    /// The Claude Code versions in `profile` older than its newest one.
+    fn old_versions_in(profile: &Path) -> Vec<PathBuf> {
+        let dir = profile.join("claude-code");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut versions: Vec<(Vec<u64>, PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| fsx::is_real_dir(&e.path()))
+            .filter_map(|e| Some((version(&e.file_name().to_string_lossy())?, e.path())))
+            .collect();
+        versions.sort();
+        versions.pop();
+        versions.into_iter().map(|(_, path)| path).collect()
+    }
+
+    /// Where the disk space goes: each profile, what a clean-up would free,
+    /// the backups, the shared VM and the transcripts. Reads only.
+    pub fn storage(&self) -> Result<Storage> {
+        let current = self.current().ok();
+        let mut old_backups = 0;
+        let mut profiles = Vec::new();
+        for name in self.profiles()? {
+            let path = self.paths.root.join(&name);
+            let size = |paths: Vec<PathBuf>| paths.iter().map(|p| fsx::disk_usage(p)).sum();
+            old_backups += size(self.old_backups(&name, "profile", &format!("{name}-")))
+                + size(self.old_backups(&name, "session-cards", &format!("sessions-{name}-")));
+            profiles.push(ProfileStorage {
+                current: current.as_deref() == Some(name.as_str()),
+                bytes: fsx::disk_usage(&path),
+                caches: size(Self::caches_in(&path)),
+                old_versions: size(Self::old_versions_in(&path)),
+                name,
+            });
+        }
+        Ok(Storage {
+            profiles,
+            backups: fsx::disk_usage(&self.backups()),
+            old_backups,
+            shared: fsx::disk_usage(&self.shared()),
+            transcripts: fsx::disk_usage(&self.paths.config.join("projects")),
+            keep: self.keep,
+        })
+    }
+
+    /// Free the space the app makes again by itself: the caches and older
+    /// Claude Code versions of every profile but the one in use, and the
+    /// backups past the newest few. Sessions, logins and transcripts stay.
+    pub fn clean(&self) -> Result<CleanReport> {
+        let _lock = self.lock()?;
+        let current = self.current()?;
+        let mut report = CleanReport {
+            profiles: Vec::new(),
+            freed: 0,
+            backups_removed: 0,
+        };
+        for name in self.profiles()? {
+            for (kind, prefix) in [
+                ("profile", format!("{name}-")),
+                ("session-cards", format!("sessions-{name}-")),
+            ] {
+                for path in self.old_backups(&name, kind, &prefix) {
+                    let bytes = fsx::disk_usage(&path);
+                    fs::remove_dir_all(&path).map_err(|e| io(&path, e))?;
+                    report.freed += bytes;
+                    report.backups_removed += 1;
+                }
+            }
+            if name == current {
+                continue;
+            }
+            let path = self.paths.root.join(&name);
+            for dir in Self::caches_in(&path)
+                .into_iter()
+                .chain(Self::old_versions_in(&path))
+            {
+                let bytes = fsx::disk_usage(&dir);
+                fs::remove_dir_all(&dir).map_err(|e| io(&dir, e))?;
+                report.freed += bytes;
+            }
+            report.profiles.push(name);
+        }
+        Ok(report)
     }
 
     /// The profiles to take cards from, and those left out for having no
@@ -1062,7 +1344,7 @@ impl<A: DesktopApp> Desktop<A> {
                 "Claude opened again before the sync; quit it and try again",
             ));
         }
-        let backup = self.session_backup(target, &plan.pair, &plan.dest)?;
+        let backup = self.session_backup(target, &plan.pair, &plan.dest, &plan.cards)?;
         report.backup = Some(backup.display().to_string());
         for (written, card) in plan.cards.iter().enumerate() {
             let wrote = if self.app.running()? {

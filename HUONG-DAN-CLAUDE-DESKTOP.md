@@ -78,6 +78,10 @@ Duo Switch làm hai việc:
   app gợi ý chuyển sang hồ sơ còn trống.
 - **Hiện email cho hồ sơ:** chuột phải vào hồ sơ, chọn **Đặt tên hiển thị…**
   và ghi email. Email được che mờ, bấm vào mới hiện.
+- **Dung lượng:** ở mục **Claude Desktop: hồ sơ và phiên chat**, bấm
+  **Dung lượng…** để xem mỗi hồ sơ chiếm bao nhiêu và dọn cache, bản Claude
+  Code cũ, bản sao lưu cũ của các hồ sơ **không** dùng. Hồ sơ đang dùng, thẻ
+  phiên, đăng nhập và nội dung phiên ở `~/.claude/projects` giữ nguyên.
 
 ## 5. Codex Desktop
 
@@ -112,7 +116,7 @@ chắc sửa an toàn. Hồ sơ nguồn không bao giờ bị thay đổi.
 | `~/ClaudeProfiles/tk1`, `tk2`, … | Các hồ sơ Claude Desktop |
 | `~/Library/Application Support/Claude` | Một **liên kết** (symlink) trỏ vào hồ sơ đang dùng |
 | `~/ClaudeProfiles/_meta/` | Tài khoản đã gắn, cài đặt auto-sync, tên hiển thị |
-| `~/ClaudeProfiles/_backups/` | Bản sao lưu trước mỗi lần chuyển và mỗi lần đồng bộ. **App không tự xoá**; thỉnh thoảng hãy dọn bớt bản cũ để giải phóng ổ đĩa |
+| `~/ClaudeProfiles/_backups/` | Bản sao lưu hồ sơ trước mỗi lần chuyển (không gồm cache ở mọi cấp), và danh sách thẻ được thêm trước mỗi lần đồng bộ. App tự giữ **3 bản mới nhất** mỗi loại của từng hồ sơ; đổi số này bằng biến `CLAUDE_SWITCH_KEEP_BACKUPS` (`0` = giữ tất cả). Bản sao lưu kèm nội dung phiên không bao giờ bị xoá |
 | `~/.pitstop/vault/` | Login Codex đã lưu, mã hoá; khoá nằm trong Keychain |
 
 Mọi thứ chỉ nằm trên máy. Duo Switch không đọc cookie hay token của Claude
