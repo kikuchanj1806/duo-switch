@@ -3,7 +3,7 @@
 Release notes are taken from the section headed `## [X.Y.Z]` matching the tag
 `vX.Y.Z`: rename `Unreleased` to the version and date when releasing.
 
-## [Unreleased]
+## [0.5.2] - 2026-10-28
 
 - Claude Desktop: a profile's backup leaves out Chromium's caches at any
   depth (the preview browser keeps ~1 GB under `Partitions/`), and only the
